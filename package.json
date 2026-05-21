@@ -1,0 +1,22 @@
+{
+  "name": "cli-chatbot",
+  "module": "index.ts",
+  "type": "module",
+  "private": true,
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  },
+  "dependencies": {
+    "boxen": "^8.0.1",
+    "chalk": "^5.6.2",
+    "dotenv": "^17.4.2",
+    "gradient-string": "^3.0.0",
+    "groq-sdk": "^1.2.0",
+    "marked": "9",
+    "marked-terminal": "6",
+    "ora": "^9.4.0"
+  }
+}
