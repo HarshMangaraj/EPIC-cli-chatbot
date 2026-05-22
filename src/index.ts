@@ -51,8 +51,13 @@ function loadConfig(): Config {
   return { ...DEFAULT_CONFIG, ...JSON.parse(text) };
 }
 
-// Load config once at startup
-const config = loadConfig();
+// Load config once at startup (may be overridden by per-user DB config)
+let config = loadConfig();
+
+// Defer importing auth/conversations/db so we can set Prisma env first
+let loadSession: any, register: any, login: any, logout: any, loadUserConfig: any, saveUserConfig: any;
+let createConversation: any, setConversationTitle: any, saveMessage: any, loadRecentMessages: any, listConversations: any, deleteConversation: any, deleteAccount: any;
+let prisma: any;
 
 /* ================================================== */
 /* GROQ CLIENT                                        */
@@ -141,6 +146,35 @@ function printFooter() {
     "\n" + chalk.cyan("  │") +
     "\n" + chalk.cyan("  └" + "─".repeat(58)) + "\n"
   );
+}
+
+// Simple promise-based question helper. Set `mask` to true to hide input (for passwords).
+function askQuestion(prompt: string, mask = false): Promise<string> {
+  return new Promise((resolve) => {
+    if (!mask) return rl.question(prompt, (ans) => resolve(ans));
+
+    const stdin = process.stdin;
+    process.stdout.write(prompt);
+    stdin.resume();
+    stdin.setRawMode(true);
+
+    let input = "";
+    function onData(chunk: Buffer) {
+      const char = chunk.toString("utf8");
+      if (char === "\r" || char === "\n" || char === "\u0004") {
+        stdin.removeListener("data", onData);
+        stdin.setRawMode(false);
+        process.stdout.write("\n");
+        resolve(input);
+        return;
+      }
+      if (char === "\u0003") process.exit();
+      input += char;
+      process.stdout.write("*");
+    }
+
+    stdin.on("data", onData);
+  });
 }
 
 /* ================================================== */
@@ -415,17 +449,59 @@ async function startChat() {
       if (!trimmed) return startChat();
 
       /* ---------- SLASH COMMANDS ---------- */
-      if (trimmed === "/help") {
-        handleHelp(); return startChat();
-      } else if (trimmed === "/clear") {
-        handleClear(); return startChat();
-      } else if (trimmed === "/save") {
-        handleSave(); return startChat();
-      } else if (trimmed === "/count") {
-        handleCount(); return startChat();
-      } else if (trimmed === "/config") {
-        handleShowConfig(); return startChat();
-      } else if (trimmed.startsWith("/")) {
+      const parts = trimmed.split(/\s+/);
+      if (trimmed === "/help") { handleHelp(); return startChat(); }
+      else if (trimmed === "/clear") { handleClear(); return startChat(); }
+      else if (trimmed === "/save") { handleSave(); return startChat(); }
+      else if (trimmed === "/count") { handleCount(); return startChat(); }
+      else if (trimmed === "/config") { handleShowConfig(); return startChat(); }
+
+      // /logout
+      else if (trimmed === "/logout") {
+        logout();
+        console.log(chalk.yellowBright("  Session cleared. Restart to log in again."));
+        process.exit(0);
+      }
+
+      // /conversations — list all past conversations
+      else if (trimmed === "/conversations") {
+        const convs = await listConversations(session.userId);
+        convs.forEach((c: any) => {
+          console.log(
+            chalk.cyan(`  [${c.id}] `) +
+            chalk.white(c.title ?? "Untitled") +
+            chalk.gray(` · ${c._count.messages} msgs · ${c.model} · ${c.createdAt.toLocaleDateString()}`)
+          );
+        });
+        return startChat();
+      }
+
+      // /history — reload a past conversation
+      else if (parts[0] === "/history") {
+        const id = parseInt(parts[1] ?? "", 10);
+        if (isNaN(id)) { console.log(chalk.red("  Usage: /history <id>")); return startChat(); }
+        currentConvId = id;
+        isFirstMessage = false;
+        const msgs = await loadRecentMessages(id, 20);
+        messages.splice(1); // keep system prompt
+        messages.push(...msgs);
+        console.log(chalk.green(`  ✓ Loaded conversation ${id} (${msgs.length} messages)`));
+        return startChat();
+      }
+
+      // /deleteaccount
+      else if (trimmed === "/deleteaccount") {
+        const confirm = await askQuestion("  Type DELETE to confirm: ");
+        if (confirm === "DELETE") {
+          await deleteAccount(session.userId);
+          logout();
+          console.log(chalk.red("  Account deleted."));
+          process.exit(0);
+        }
+        return startChat();
+      }
+
+      else if (trimmed.startsWith("/")) {
         console.log("\n" + chalk.redBright(`  Unknown command: ${trimmed}`) + chalk.gray("  — type /help\n"));
         return startChat();
       }
@@ -443,10 +519,15 @@ async function startChat() {
       /* ---------- NORMAL CHAT — SEND TO AI ---------- */
       messages.push({ role: "user", content: trimmed });
 
-      // Context window guard — keep max 20 messages
+      // Save user message to DB
+      await saveMessage(currentConvId, "user", trimmed);
+
+      // Context window guard — keep max 20 messages (load from DB when trimming)
       const MAX = 20;
       if (messages.length > MAX + 1) {
-        messages.splice(1, messages.length - MAX - 1);
+        const history = await loadRecentMessages(currentConvId, MAX);
+        messages.splice(1);
+        messages.push(...history);
       }
 
       const spinner = ora({
@@ -476,7 +557,17 @@ async function startChat() {
         }
 
         printFooter();
+
+        // Save assistant reply to DB
+        await saveMessage(currentConvId, "assistant", reply);
+
         messages.push({ role: "assistant", content: reply });
+
+        // Auto-title the conversation from the first message
+        if (isFirstMessage) {
+          await setConversationTitle(currentConvId, trimmed);
+          isFirstMessage = false;
+        }
 
       } catch (error: any) {
         spinner.stop();
@@ -497,6 +588,45 @@ async function startChat() {
 /* ================================================== */
 /* START                                              */
 /* ================================================== */
+
+// Ensure Prisma uses the binary engine by default when running locally
+process.env.PRISMA_CLIENT_ENGINE_TYPE = process.env.PRISMA_CLIENT_ENGINE_TYPE ?? "binary";
+
+// Dynamically import auth/conversations/db now that env is set
+({ loadSession, register, login, logout, loadUserConfig, saveUserConfig } = await import("./auth"));
+({ createConversation, setConversationTitle, saveMessage, loadRecentMessages, listConversations, deleteConversation, deleteAccount } = await import("./conversations"));
+({ prisma } = await import("./db"));
+
+// ── Startup ──────────────────────────────────────────────────
+let session: any = loadSession();
+
+if (!session) {
+  const choice = await askQuestion("  No session found. [l]ogin or [r]egister? ");
+
+  const email = await askQuestion("  Email: ");
+  const password = await askQuestion("  Password: ", true);
+
+  try {
+    session = choice.toLowerCase().startsWith("r")
+      ? await register(email, password)
+      : await login(email, password);
+    console.log(chalk.greenBright(`\n  ✓ Welcome, ${session.email}\n`));
+  } catch (e: any) {
+    console.log(chalk.redBright(`\n  ✗ ${e.message}\n`));
+    process.exit(1);
+  }
+}
+
+// Load this user's config from DB (replaces file-based config)
+const userConfig = await loadUserConfig(session.userId);
+config = { ...config, ...userConfig } as any;
+
+// Start a new conversation in DB for this session
+let currentConvId = await createConversation(session.userId, config.model);
+let isFirstMessage = true;
+
+// Graceful shutdown
+process.on("exit", () => prisma.$disconnect());
 
 banner();
 startChat();
