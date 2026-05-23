@@ -13,48 +13,33 @@ import * as os from "os";
 dotenv.config();
 
 /* ================================================== */
-/* PHASE 3 — CONFIG FILE                              */
-/* Lives at ~/.epiccode.json on your computer         */
-/* Created automatically on first run                 */
+/* CONFIG FILE  (~/.epiccode.json)                    */
 /* ================================================== */
 
-// The shape of the config object
 interface Config {
   model: string;
   theme: string;
 }
 
-// Default values if no config file exists yet
 const DEFAULT_CONFIG: Config = {
   model: "llama-3.3-70b-versatile",
   theme: "cyan",
 };
 
-// Full path to the config file — os.homedir() gives your home folder
-// e.g. /Users/yourname/.epiccode.json  or  C:\Users\yourname\.epiccode.json
 const CONFIG_PATH = path.join(os.homedir(), ".epiccode.json");
 
 function loadConfig(): Config {
-  // Check if the file exists
   if (!fs.existsSync(CONFIG_PATH)) {
-    // First run — create the file with defaults
-    fs.writeFileSync(
-      CONFIG_PATH,
-      JSON.stringify(DEFAULT_CONFIG, null, 2), // null, 2 = pretty print
-      "utf-8"
-    );
+    fs.writeFileSync(CONFIG_PATH, JSON.stringify(DEFAULT_CONFIG, null, 2), "utf-8");
     return DEFAULT_CONFIG;
   }
-
-  // File exists — read it and parse the JSON text back into an object
   const text = fs.readFileSync(CONFIG_PATH, "utf-8");
   return { ...DEFAULT_CONFIG, ...JSON.parse(text) };
 }
 
-// Load config once at startup (may be overridden by per-user DB config)
 let config = loadConfig();
 
-// Defer importing auth/conversations/db so we can set Prisma env first
+// Deferred imports — set Prisma env before loading
 let loadSession: any, register: any, login: any, logout: any, loadUserConfig: any, saveUserConfig: any;
 let createConversation: any, setConversationTitle: any, saveMessage: any, loadRecentMessages: any, listConversations: any, deleteConversation: any, deleteAccount: any;
 let prisma: any;
@@ -63,9 +48,7 @@ let prisma: any;
 /* GROQ CLIENT                                        */
 /* ================================================== */
 
-const groq = new Groq({
-  apiKey: process.env.GROQ_API_KEY,
-});
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
 /* ================================================== */
 /* READLINE                                           */
@@ -79,6 +62,8 @@ const rl = readline.createInterface({
 /* ================================================== */
 /* AI MEMORY                                          */
 /* ================================================== */
+
+const MAX_MESSAGES = 20;
 
 const messages: any[] = [
   {
@@ -102,7 +87,7 @@ Rules:
 /* BANNER                                             */
 /* ================================================== */
 
-function banner() {
+function banner(session: { email: string }) {
   console.clear();
 
   const title = gradient.rainbow.multiline(`
@@ -117,17 +102,19 @@ function banner() {
   console.log(title);
   console.log(chalk.gray("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"));
   console.log(chalk.cyanBright.bold("               ⚡ EPIC CODE AI ASSISTANT ⚡"));
-  console.log(chalk.gray(`\n         Model: ${config.model}`));
+  console.log(chalk.gray(`\n         Model : ${chalk.whiteBright(config.model)}`));
+  console.log(chalk.gray(`         User  : ${chalk.whiteBright(session.email)}`));
   console.log(chalk.gray(`         Config: ${CONFIG_PATH}`));
   console.log(chalk.gray('\n         Type /help for commands  |  "exit" to quit\n'));
+  console.log(chalk.gray("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"));
 }
 
 /* ================================================== */
-/* HELPERS                                            */
+/* UI HELPERS                                         */
 /* ================================================== */
 
 function currentTime(): string {
-  return new Date().toLocaleTimeString();
+  return new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 function printHeader() {
@@ -135,7 +122,7 @@ function printHeader() {
     "\n" +
     chalk.cyan("  ┌─ ") +
     chalk.cyanBright.bold("EPIC CODE") +
-    chalk.gray("  [" + currentTime() + "]")
+    chalk.gray("  " + currentTime())
   );
   console.log(chalk.cyan("  │"));
   process.stdout.write(chalk.cyan("  │  "));
@@ -148,29 +135,72 @@ function printFooter() {
   );
 }
 
-// Simple promise-based question helper. Set `mask` to true to hide input (for passwords).
+function boxLine(label: string, value: string) {
+  return chalk.cyan("  │  ") + chalk.gray(`${label}: `) + chalk.whiteBright(value) + "\n";
+}
+
+function boxOpen(title: string) {
+  return (
+    "\n" +
+    chalk.cyan("  ┌─ ") + chalk.yellowBright.bold(title) + "\n" +
+    chalk.cyan("  │\n")
+  );
+}
+
+function boxClose() {
+  return chalk.cyan("  └" + "─".repeat(58)) + "\n";
+}
+
+// Prompt helper — set mask=true to hide password input.
+// In masked mode we show nothing (blank) — the safest cross-platform
+// approach. Showing one * per keypress breaks on Windows raw mode and
+// when characters are pasted because stdin fires one event per byte,
+// not per logical character, making the * count wrong.
 function askQuestion(prompt: string, mask = false): Promise<string> {
   return new Promise((resolve) => {
-    if (!mask) return rl.question(prompt, (ans) => resolve(ans));
+    if (!mask) return rl.question(prompt, resolve);
 
     const stdin = process.stdin;
     process.stdout.write(prompt);
+
+    // Pause readline so it doesn't intercept our raw keystrokes
+    rl.pause();
     stdin.resume();
     stdin.setRawMode(true);
+    stdin.setEncoding("utf8");
 
     let input = "";
-    function onData(chunk: Buffer) {
-      const char = chunk.toString("utf8");
+
+    function onData(char: string) {
       if (char === "\r" || char === "\n" || char === "\u0004") {
-        stdin.removeListener("data", onData);
+        // Enter pressed — submit
         stdin.setRawMode(false);
+        stdin.removeListener("data", onData);
+        rl.resume();
         process.stdout.write("\n");
         resolve(input);
         return;
       }
-      if (char === "\u0003") process.exit();
+
+      if (char === "\u0003") {
+        // Ctrl+C
+        process.stdout.write("\n");
+        process.exit(0);
+      }
+
+      if (char === "\u007f" || char === "\b") {
+        // Backspace — erase one character silently
+        if (input.length > 0) {
+          input = input.slice(0, -1);
+        }
+        return;
+      }
+
+      // Ignore other control characters (arrows, function keys, etc.)
+      if (char < " ") return;
+
       input += char;
-      process.stdout.write("*");
+      // Show nothing — blank password field, standard terminal behaviour
     }
 
     stdin.on("data", onData);
@@ -178,46 +208,44 @@ function askQuestion(prompt: string, mask = false): Promise<string> {
 }
 
 /* ================================================== */
-/* SLASH COMMANDS                                     */
+/* SLASH COMMAND HANDLERS                             */
 /* ================================================== */
 
 function handleHelp() {
-  console.log(
-    "\n" +
-    chalk.cyan("  ┌─ ") + chalk.yellowBright.bold("COMMANDS") + "\n" +
+  const cmd = (c: string, desc: string) =>
+    chalk.cyan("  │  ") + chalk.greenBright(c.padEnd(20)) + chalk.gray(desc) + "\n";
+
+  process.stdout.write(
+    boxOpen("COMMANDS") +
+    cmd("/help",               "show this menu") +
+    cmd("/clear",              "reset the conversation") +
+    cmd("/save",               "export chat to a markdown file") +
+    cmd("/count",              "messages in memory") +
+    cmd("/config",             "show current settings") +
+    cmd("/config set <k> <v>", "update model or theme") +
+    cmd("/conversations",      "list past conversations") +
+    cmd("/history <id>",       "load a past conversation") +
+    cmd("/logout",             "clear session and exit") +
+    cmd("/deleteaccount",      "permanently delete account") +
+    cmd("create <app>",        "generate a project on disk") +
+    cmd("exit",                "quit") +
     chalk.cyan("  │\n") +
-    chalk.cyan("  │  ") + chalk.greenBright("/help") +
-    chalk.gray("           show this menu\n") +
-    chalk.cyan("  │  ") + chalk.greenBright("/clear") +
-    chalk.gray("          reset the conversation\n") +
-    chalk.cyan("  │  ") + chalk.greenBright("/save") +
-    chalk.gray("           save chat to a file\n") +
-    chalk.cyan("  │  ") + chalk.greenBright("/count") +
-    chalk.gray("          show messages in memory\n") +
-    chalk.cyan("  │  ") + chalk.greenBright("/config") +
-    chalk.gray("         show current config\n") +
-    chalk.cyan("  │  ") + chalk.greenBright("create [app]") +
-    chalk.gray("    generate a project on disk\n") +
-    chalk.cyan("  │  ") + chalk.redBright("exit") +
-    chalk.gray("             quit\n") +
-    chalk.cyan("  └" + "─".repeat(58)) + "\n"
+    boxClose()
   );
 }
 
 function handleClear() {
   messages.splice(1);
-  console.log(
-    "\n" +
-    chalk.cyan("  ┌─ ") + chalk.yellowBright.bold("CLEARED") + "\n" +
-    chalk.cyan("  │\n") +
+  process.stdout.write(
+    boxOpen("CLEARED") +
     chalk.cyan("  │  ") + chalk.gray("Conversation reset. AI memory wiped.\n") +
-    chalk.cyan("  └" + "─".repeat(58)) + "\n"
+    chalk.cyan("  │\n") +
+    boxClose()
   );
 }
 
 function handleSave() {
   const conversation = messages.slice(1);
-
   if (conversation.length === 0) {
     console.log("\n" + chalk.gray("  Nothing to save yet.\n"));
     return;
@@ -234,70 +262,79 @@ function handleSave() {
 
   fs.writeFileSync(filename, fileContent, "utf-8");
 
-  console.log(
-    "\n" +
-    chalk.cyan("  ┌─ ") + chalk.yellowBright.bold("SAVED") + "\n" +
-    chalk.cyan("  │\n") +
+  process.stdout.write(
+    boxOpen("SAVED") +
     chalk.cyan("  │  ") + chalk.greenBright("✓ ") + chalk.gray(`Saved to: ${filename}\n`) +
-    chalk.cyan("  └" + "─".repeat(58)) + "\n"
+    chalk.cyan("  │\n") +
+    boxClose()
   );
 }
 
 function handleCount() {
   const turns = messages.length - 1;
-  console.log(
-    "\n" +
-    chalk.cyan("  ┌─ ") + chalk.yellowBright.bold("MEMORY") + "\n" +
+  const bar = "█".repeat(Math.min(turns, MAX_MESSAGES)) + "░".repeat(Math.max(0, MAX_MESSAGES - turns));
+  process.stdout.write(
+    boxOpen("MEMORY") +
+    chalk.cyan("  │  ") + chalk.gray(`Messages: `) + chalk.whiteBright(`${turns} / ${MAX_MESSAGES}`) + "\n" +
+    chalk.cyan("  │  ") + chalk.cyan(bar) + "\n" +
     chalk.cyan("  │\n") +
-    chalk.cyan("  │  ") + chalk.gray(`Messages in memory: ${turns}\n`) +
-    chalk.cyan("  └" + "─".repeat(58)) + "\n"
+    boxClose()
   );
 }
 
 function handleShowConfig() {
-  console.log(
-    "\n" +
-    chalk.cyan("  ┌─ ") + chalk.yellowBright.bold("CONFIG") + "\n" +
+  process.stdout.write(
+    boxOpen("CONFIG") +
+    boxLine("File ", CONFIG_PATH) +
+    boxLine("Model", config.model) +
+    boxLine("Theme", config.theme) +
     chalk.cyan("  │\n") +
-    chalk.cyan("  │  ") + chalk.gray(`File:  ${CONFIG_PATH}\n`) +
-    chalk.cyan("  │  ") + chalk.gray(`Model: ${config.model}\n`) +
-    chalk.cyan("  │  ") + chalk.gray(`Theme: ${config.theme}\n`) +
+    chalk.cyan("  │  ") + chalk.gray("Use: /config set model <name>  or  /config set theme <color>\n") +
     chalk.cyan("  │\n") +
-    chalk.cyan("  │  ") + chalk.gray("Edit the file to change settings.\n") +
-    chalk.cyan("  └" + "─".repeat(58)) + "\n"
+    boxClose()
+  );
+}
+
+async function handleSetConfig(
+  key: string,
+  value: string,
+  session: { userId: number }
+) {
+  if (!["model", "theme"].includes(key)) {
+    console.log(chalk.redBright(`  Unknown config key "${key}". Valid keys: model, theme`));
+    return;
+  }
+  (config as any)[key] = value;
+  await saveUserConfig(session.userId, { [key]: value });
+
+  process.stdout.write(
+    boxOpen("CONFIG UPDATED") +
+    boxLine(key, value) +
+    chalk.cyan("  │\n") +
+    boxClose()
   );
 }
 
 /* ================================================== */
-/* PHASE 4 — FILE CREATION                            */
-/*                                                    */
-/* When user types "create a todo app":               */
-/* 1. Detect the word "create" at the start           */
-/* 2. Ask AI to return files in a parseable format    */
-/* 3. Split the response to get each file             */
-/* 4. Write every file to disk                        */
+/* PROJECT GENERATOR  (create <app>)                  */
 /* ================================================== */
 
 async function handleCreate(userInput: string) {
-
-  // Extract what they want to build
-  // "create a todo app in React" → "a todo app in React"
   const projectDescription = userInput.replace(/^create\s+/i, "").trim();
 
-  // Turn the description into a folder name
-  // "a todo app in React" → "todo-app-in-react"
   const folderName = projectDescription
     .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")  // replace non-letters with hyphens
-    .replace(/^-|-$/g, "")         // remove leading/trailing hyphens
-    .slice(0, 40);                  // max 40 chars
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 40);
 
-  console.log(
-    "\n" + chalk.cyan("  ┌─ ") + chalk.yellowBright.bold("CREATING PROJECT") + "\n" +
-    chalk.cyan("  │\n") +
-    chalk.cyan("  │  ") + chalk.gray(`Building: ${projectDescription}\n`) +
-    chalk.cyan("  │  ") + chalk.gray(`Folder:   ./${folderName}/\n`) +
-    chalk.cyan("  │")
+  const projectPath = path.join(process.cwd(), folderName);
+
+  process.stdout.write(
+    boxOpen("CREATING PROJECT") +
+    chalk.cyan("  │  ") + chalk.gray(`Building : `) + chalk.whiteBright(projectDescription) + "\n" +
+    chalk.cyan("  │  ") + chalk.gray(`Location : `) + chalk.whiteBright(projectPath) + "\n" +
+    chalk.cyan("  │\n")
   );
 
   const spinner = ora({
@@ -306,13 +343,6 @@ async function handleCreate(userInput: string) {
   }).start();
 
   try {
-
-    /* ------------------------------------------------ */
-    /* SPECIAL PROMPT FOR FILE GENERATION               */
-    /*                                                  */
-    /* We tell the AI exactly what format to use        */
-    /* so we can reliably split its response into files */
-    /* ------------------------------------------------ */
     const creationPrompt = `
 You are a code generator. The user wants you to create: ${projectDescription}
 
@@ -337,296 +367,346 @@ Rules:
       model: config.model,
       messages: [
         { role: "system", content: "You are a code generator. Only output files in the requested format. No extra text." },
-        { role: "user", content: creationPrompt },
+        { role: "user",   content: creationPrompt },
       ],
-      // No streaming here — we need the full response to parse it
       stream: false,
     });
 
     spinner.stop();
 
     const aiResponse = completion.choices[0]?.message?.content || "";
-
-    /* ------------------------------------------------ */
-    /* PARSE THE AI RESPONSE INTO FILES                 */
-    /*                                                  */
-    /* Split by "FILE:" to get each file block          */
-    /* Then extract filename and content from each block*/
-    /* ------------------------------------------------ */
-    const fileBlocks = aiResponse
-      .split(/^FILE:/m)           // split on lines starting with "FILE:"
-      .slice(1);                  // first item is empty, skip it
+    const fileBlocks = aiResponse.split(/^FILE:/m).slice(1);
 
     if (fileBlocks.length === 0) {
-      console.log(chalk.redBright("  │  ✗ AI did not return files in the expected format.\n"));
-      console.log(chalk.gray("  │  Raw response:\n"), aiResponse.slice(0, 300));
-      console.log(chalk.cyan("  └" + "─".repeat(58)) + "\n");
+      console.log(chalk.redBright("  │  ✗ AI did not return files in the expected format."));
+      console.log(chalk.gray("  │  Raw response preview:\n"), aiResponse.slice(0, 300));
+      console.log(boxClose());
       return;
     }
 
-    /* ------------------------------------------------ */
-    /* CREATE THE PROJECT FOLDER                        */
-    /* recursive: true means it creates parent folders  */
-    /* too if they don't exist — no error if it exists  */
-    /* ------------------------------------------------ */
-    fs.mkdirSync(folderName, { recursive: true });
+    fs.mkdirSync(projectPath, { recursive: true });
 
     const createdFiles: string[] = [];
 
     for (const block of fileBlocks) {
-
-      // First line of the block is the filename
-      const lines = block.trim().split("\n");
+      const lines  = block.trim().split("\n");
       const filename = lines[0]?.trim();
-
-      // The rest is the file content — remove code fence markers
-      const content = lines
+      const content  = lines
         .slice(1)
         .join("\n")
-        .replace(/^```[\w]*\n?/, "")   // remove opening ```
-        .replace(/\n?```$/, "")         // remove closing ```
+        .replace(/^```[\w]*\n?/, "")
+        .replace(/\n?```$/, "")
         .trim();
 
       if (!filename || !content) continue;
 
-      // Build the full file path inside the project folder
-      const filePath = path.join(folderName, filename);
-
-      // Create any subfolders needed (e.g. src/ inside the project)
-      const fileDir = path.dirname(filePath);
-      fs.mkdirSync(fileDir, { recursive: true });
-
-      // Write the actual file
+      const filePath = path.join(projectPath, filename);
+      fs.mkdirSync(path.dirname(filePath), { recursive: true });
       fs.writeFileSync(filePath, content, "utf-8");
-
       createdFiles.push(filename);
 
-      // Show each file as it gets written
       console.log(
         chalk.cyan("  │  ") +
         chalk.greenBright("✓ ") +
-        chalk.gray(filename)
+        chalk.whiteBright(filename.padEnd(30)) +
+        chalk.gray(`${content.split("\n").length} lines`)
       );
     }
 
-    /* ------------------------------------------------ */
-    /* DONE                                             */
-    /* ------------------------------------------------ */
-    console.log(
+    process.stdout.write(
       chalk.cyan("  │\n") +
-      chalk.cyan("  │  ") + chalk.greenBright(`${createdFiles.length} files created in ./${folderName}/\n`) +
-      chalk.cyan("  │  ") + chalk.gray(`To get started:\n`) +
+      chalk.cyan("  │  ") + chalk.greenBright(`${createdFiles.length} files created\n`) +
       chalk.cyan("  │\n") +
-      chalk.cyan("  │    ") + chalk.whiteBright(`cd ${folderName}\n`) +
+      chalk.cyan("  │  ") + chalk.gray("Get started:\n") +
+      chalk.cyan("  │\n") +
+      chalk.cyan("  │    ") + chalk.whiteBright(`cd ${projectPath}\n`) +
       chalk.cyan("  │    ") + chalk.whiteBright(`cat README.md\n`) +
-      chalk.cyan("  └" + "─".repeat(58)) + "\n"
+      boxClose()
     );
 
   } catch (error: any) {
     spinner.stop();
     console.log(chalk.redBright("  │  ✗ Error generating files: " + error?.message));
-    console.log(chalk.cyan("  └" + "─".repeat(58)) + "\n");
+    console.log(boxClose());
   }
 }
 
 /* ================================================== */
-/* CHAT LOOP                                          */
+/* MAIN CHAT LOOP  (iterative — no recursion)         */
+/* Recursive readline callbacks blow the stack after  */
+/* ~10 000 messages. A while-loop avoids that entirely*/
 /* ================================================== */
 
-async function startChat() {
-  rl.question(
-    chalk.greenBright.bold("\n❯ You: "),
-    async (input) => {
+async function startChat(session: { userId: number; email: string }) {
+  let currentConvId: number = await createConversation(session.userId, config.model);
+  let isFirstMessage = true;
 
-      const trimmed = input.trim();
+  while (true) {
+    const input = await askQuestion(chalk.greenBright.bold("\n❯ You: "));
+    const trimmed = input.trim();
 
-      if (trimmed.toLowerCase() === "exit") {
-        console.log(chalk.yellowBright("\n👋 Goodbye!\n"));
-        rl.close();
-        process.exit(0);
-      }
+    if (!trimmed) continue;
 
-      if (!trimmed) return startChat();
+    /* ── Exit ───────────────────────────────────────── */
+    if (trimmed.toLowerCase() === "exit") {
+      console.log(chalk.yellowBright("\n  👋  Goodbye!\n"));
+      break;
+    }
 
-      /* ---------- SLASH COMMANDS ---------- */
-      const parts = trimmed.split(/\s+/);
-      if (trimmed === "/help") { handleHelp(); return startChat(); }
-      else if (trimmed === "/clear") { handleClear(); return startChat(); }
-      else if (trimmed === "/save") { handleSave(); return startChat(); }
-      else if (trimmed === "/count") { handleCount(); return startChat(); }
-      else if (trimmed === "/config") { handleShowConfig(); return startChat(); }
+    const parts = trimmed.split(/\s+/);
 
-      // /logout
-      else if (trimmed === "/logout") {
-        logout();
-        console.log(chalk.yellowBright("  Session cleared. Restart to log in again."));
-        process.exit(0);
-      }
+    /* ── Slash commands ─────────────────────────────── */
+    if (trimmed === "/help")    { handleHelp();        continue; }
+    if (trimmed === "/clear")   { handleClear();       continue; }
+    if (trimmed === "/save")    { handleSave();        continue; }
+    if (trimmed === "/count")   { handleCount();       continue; }
+    if (trimmed === "/config")  { handleShowConfig();  continue; }
 
-      // /conversations — list all past conversations
-      else if (trimmed === "/conversations") {
-        const convs = await listConversations(session.userId);
+    // /config set <key> <value>
+    if (parts[0] === "/config" && parts[1] === "set") {
+      await handleSetConfig(parts[2] ?? "", parts.slice(3).join(" "), session);
+      continue;
+    }
+
+    // /logout
+    if (trimmed === "/logout") {
+      logout();
+      console.log(chalk.yellowBright("\n  Session cleared. Restart to log in again.\n"));
+      break;
+    }
+
+    // /conversations
+    if (trimmed === "/conversations") {
+      const convs = await listConversations(session.userId);
+      if (convs.length === 0) {
+        console.log(chalk.gray("\n  No past conversations.\n"));
+      } else {
+        process.stdout.write(boxOpen("CONVERSATIONS"));
         convs.forEach((c: any) => {
           console.log(
-            chalk.cyan(`  [${c.id}] `) +
-            chalk.white(c.title ?? "Untitled") +
-            chalk.gray(` · ${c._count.messages} msgs · ${c.model} · ${c.createdAt.toLocaleDateString()}`)
+            chalk.cyan("  │  ") +
+            chalk.yellowBright(`[${c.id}]`) + " " +
+            chalk.whiteBright((c.title ?? "Untitled").padEnd(35)) +
+            chalk.gray(`${c._count.messages} msgs · ${c.model ?? "?"}`)
           );
         });
-        return startChat();
+        process.stdout.write(chalk.cyan("  │\n") + boxClose());
       }
-
-      // /history — reload a past conversation
-      else if (parts[0] === "/history") {
-        const id = parseInt(parts[1] ?? "", 10);
-        if (isNaN(id)) { console.log(chalk.red("  Usage: /history <id>")); return startChat(); }
-        currentConvId = id;
-        isFirstMessage = false;
-        const msgs = await loadRecentMessages(id, 20);
-        messages.splice(1); // keep system prompt
-        messages.push(...msgs);
-        console.log(chalk.green(`  ✓ Loaded conversation ${id} (${msgs.length} messages)`));
-        return startChat();
-      }
-
-      // /deleteaccount
-      else if (trimmed === "/deleteaccount") {
-        const confirm = await askQuestion("  Type DELETE to confirm: ");
-        if (confirm === "DELETE") {
-          await deleteAccount(session.userId);
-          logout();
-          console.log(chalk.red("  Account deleted."));
-          process.exit(0);
-        }
-        return startChat();
-      }
-
-      else if (trimmed.startsWith("/")) {
-        console.log("\n" + chalk.redBright(`  Unknown command: ${trimmed}`) + chalk.gray("  — type /help\n"));
-        return startChat();
-      }
-
-      /* -------------------------------------------- */
-      /* PHASE 4 — DETECT "create" INTENT             */
-      /* If the message starts with "create",          */
-      /* go to file creation mode instead of chat mode */
-      /* -------------------------------------------- */
-      if (trimmed.toLowerCase().startsWith("create ")) {
-        await handleCreate(trimmed);
-        return startChat();
-      }
-
-      /* ---------- NORMAL CHAT — SEND TO AI ---------- */
-      messages.push({ role: "user", content: trimmed });
-
-      // Save user message to DB
-      await saveMessage(currentConvId, "user", trimmed);
-
-      // Context window guard — keep max 20 messages (load from DB when trimming)
-      const MAX = 20;
-      if (messages.length > MAX + 1) {
-        const history = await loadRecentMessages(currentConvId, MAX);
-        messages.splice(1);
-        messages.push(...history);
-      }
-
-      const spinner = ora({
-        text: chalk.blueBright(" Epic CODE is thinking..."),
-        spinner: "dots",
-      }).start();
-
-      try {
-        const stream = await groq.chat.completions.create({
-          model: config.model,    // uses model from config file
-          messages,
-          stream: true,
-        });
-
-        spinner.stop();
-        printHeader();
-
-        let reply = "";
-
-        for await (const chunk of stream) {
-          const token = chunk.choices[0]?.delta?.content || "";
-          reply += token;
-          process.stdout.write(chalk.whiteBright(token));
-          if (token.includes("\n")) {
-            process.stdout.write(chalk.cyan("  │  "));
-          }
-        }
-
-        printFooter();
-
-        // Save assistant reply to DB
-        await saveMessage(currentConvId, "assistant", reply);
-
-        messages.push({ role: "assistant", content: reply });
-
-        // Auto-title the conversation from the first message
-        if (isFirstMessage) {
-          await setConversationTitle(currentConvId, trimmed);
-          isFirstMessage = false;
-        }
-
-      } catch (error: any) {
-        spinner.stop();
-        const msg =
-          error?.status === 401 ? "❌  Invalid API key — check your .env file" :
-          error?.status === 429 ? "❌  Rate limited — wait a moment and try again" :
-          error?.code === "ENOTFOUND" ? "❌  No internet connection" :
-          "❌  Unexpected error";
-        console.log("\n" + chalk.redBright(msg));
-        console.error(chalk.gray(String(error?.message || error)));
-      }
-
-      startChat();
+      continue;
     }
-  );
-}
 
-/* ================================================== */
-/* START                                              */
-/* ================================================== */
+    // /history <id>
+    if (parts[0] === "/history") {
+      const id = parseInt(parts[1] ?? "", 10);
+      if (isNaN(id)) {
+        console.log(chalk.redBright("\n  Usage: /history <id>\n"));
+        continue;
+      }
+      currentConvId = id;
+      isFirstMessage = false;
+      const msgs = await loadRecentMessages(id, MAX_MESSAGES);
+      messages.splice(1);
+      messages.push(...msgs);
+      console.log(
+        chalk.greenBright(`\n  ✓ Loaded conversation ${id}`) +
+        chalk.gray(` (${msgs.length} messages)\n`)
+      );
+      continue;
+    }
 
-// Ensure Prisma uses the binary engine by default when running locally
-process.env.PRISMA_CLIENT_ENGINE_TYPE = process.env.PRISMA_CLIENT_ENGINE_TYPE ?? "binary";
+    // /deleteaccount
+    if (trimmed === "/deleteaccount") {
+      const confirm = await askQuestion(
+        chalk.redBright("  Type DELETE to confirm account deletion: ")
+      );
+      if (confirm === "DELETE") {
+        await deleteAccount(session.userId);
+        logout();
+        console.log(chalk.redBright("\n  Account permanently deleted.\n"));
+        break;
+      }
+      console.log(chalk.gray("\n  Cancelled.\n"));
+      continue;
+    }
 
-// Dynamically import auth/conversations/db now that env is set
-({ loadSession, register, login, logout, loadUserConfig, saveUserConfig } = await import("./auth"));
-({ createConversation, setConversationTitle, saveMessage, loadRecentMessages, listConversations, deleteConversation, deleteAccount } = await import("./conversations"));
-({ prisma } = await import("./db"));
+    // Unknown slash command
+    if (trimmed.startsWith("/")) {
+      console.log(
+        "\n" + chalk.redBright(`  Unknown command: ${trimmed}`) +
+        chalk.gray("  — type /help\n")
+      );
+      continue;
+    }
 
-// ── Startup ──────────────────────────────────────────────────
-let session: any = loadSession();
+    /* ── Project generator ──────────────────────────── */
+    if (trimmed.toLowerCase().startsWith("create ")) {
+      await handleCreate(trimmed);
+      continue;
+    }
 
-if (!session) {
-  const choice = await askQuestion("  No session found. [l]ogin or [r]egister? ");
+    /* ── Normal AI chat ─────────────────────────────── */
+    messages.push({ role: "user", content: trimmed });
+    await saveMessage(currentConvId, "user", trimmed);
 
-  const email = await askQuestion("  Email: ");
-  const password = await askQuestion("  Password: ", true);
+    // Proactively trim context window BEFORE calling the API
+    if (messages.length > MAX_MESSAGES + 1) {
+      const history = await loadRecentMessages(currentConvId, MAX_MESSAGES);
+      messages.splice(1);
+      messages.push(...history);
+    }
 
-  try {
-    session = choice.toLowerCase().startsWith("r")
-      ? await register(email, password)
-      : await login(email, password);
-    console.log(chalk.greenBright(`\n  ✓ Welcome, ${session.email}\n`));
-  } catch (e: any) {
-    console.log(chalk.redBright(`\n  ✗ ${e.message}\n`));
-    process.exit(1);
+    const spinner = ora({
+      text: chalk.blueBright(" Epic CODE is thinking..."),
+      spinner: "dots",
+    }).start();
+
+    try {
+      const stream = await groq.chat.completions.create({
+        model: config.model,
+        messages,
+        stream: true,
+      });
+
+      spinner.stop();
+      printHeader();
+
+      let reply = "";
+      let lineBuffer = "";
+
+      for await (const chunk of stream) {
+        const token = chunk.choices[0]?.delta?.content || "";
+        reply += token;
+        lineBuffer += token;
+        process.stdout.write(chalk.whiteBright(token));
+
+        // Re-emit the indent prefix after each newline
+        if (token.includes("\n")) {
+          process.stdout.write(chalk.cyan("  │  "));
+          lineBuffer = "";
+        }
+      }
+
+      printFooter();
+
+      // Save once after the full reply — not per token
+      await saveMessage(currentConvId, "assistant", reply);
+      messages.push({ role: "assistant", content: reply });
+
+      // Auto-title from first user message
+      if (isFirstMessage) {
+        await setConversationTitle(currentConvId, session.userId, trimmed);
+        isFirstMessage = false;
+      }
+
+    } catch (error: any) {
+      spinner.stop();
+      const msg =
+        error?.status === 401 ? "❌  Invalid API key — check your .env file" :
+        error?.status === 429 ? "❌  Rate limited — wait a moment and try again" :
+        error?.code  === "ENOTFOUND" ? "❌  No internet connection" :
+        `❌  Unexpected error: ${error?.message ?? String(error)}`;
+      console.log("\n" + chalk.redBright("  " + msg) + "\n");
+    }
   }
 }
 
-// Load this user's config from DB (replaces file-based config)
+/* ================================================== */
+/* AUTH FLOW  (with retry on wrong password)          */
+/* ================================================== */
+
+async function authFlow(): Promise<{ userId: number; email: string }> {
+  // If a valid token exists on disk, skip the prompt entirely
+  let session = loadSession();
+  if (session) {
+    console.log(chalk.gray("  Session restored for ") + chalk.cyanBright(session.email) + "\n");
+    return session;
+  }
+
+  // No session — show login/register prompt
+  console.log(
+    chalk.gray("  ┌─────────────────────────────────────────┐\n") +
+    chalk.gray("  │  ") + chalk.cyanBright.bold("Welcome to Epic CODE") + chalk.gray("                 │\n") +
+    chalk.gray("  │  Create an account or log in to start.  │\n") +
+    chalk.gray("  └─────────────────────────────────────────┘\n")
+  );
+
+  const choice = await askQuestion(
+    chalk.cyanBright("  [l]") + chalk.gray("ogin  or  ") +
+    chalk.cyanBright("[r]") + chalk.gray("egister? ")
+  );
+  const email = await askQuestion(chalk.gray("  Email: "));
+
+  const MAX_ATTEMPTS = 3;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    const password = await askQuestion(
+      chalk.gray(`  Password (attempt ${attempt}/${MAX_ATTEMPTS}): `),
+      true
+    );
+    try {
+      session = choice.toLowerCase().startsWith("r")
+        ? await register(email, password)
+        : await login(email, password);
+      console.log(chalk.greenBright(`\n  ✓ Welcome, ${session!.email}\n`));
+      return session!;
+    } catch (e: any) {
+      if (attempt < MAX_ATTEMPTS) {
+        console.log(chalk.redBright(`\n  ✗ ${e.message}  — try again\n`));
+      } else {
+        console.log(chalk.redBright(`\n  ✗ ${e.message}  — too many attempts\n`));
+        process.exit(1);
+      }
+    }
+  }
+
+  process.exit(1); // unreachable, but TypeScript wants a return
+}
+
+/* ================================================== */
+/* ENTRY POINT                                        */
+/* ================================================== */
+
+process.env.PRISMA_CLIENT_ENGINE_TYPE =
+  process.env.PRISMA_CLIENT_ENGINE_TYPE ?? "binary";
+
+// Deferred imports — must happen after env vars are set.
+// Wrapped in try/catch so a misconfigured .env shows a clear error
+// instead of silently skipping auth.
+try {
+  ({ loadSession, register, login, logout, loadUserConfig, saveUserConfig } =
+    await import("./auth"));
+  ({ createConversation, setConversationTitle, saveMessage, loadRecentMessages,
+     listConversations, deleteConversation, deleteAccount } =
+    await import("./conversations"));
+  ({ prisma } = await import("./db"));
+} catch (err: any) {
+  console.error(chalk.redBright("\n  ✗ Failed to load modules:\n"));
+  console.error(chalk.gray("  " + (err?.message ?? String(err))));
+  console.error(chalk.gray("\n  Check your .env file and that the database is reachable.\n"));
+  process.exit(1);
+}
+
+// Graceful shutdown — disconnect Prisma and close readline
+function shutdown() {
+  try { rl.close(); }    catch { /* already closed */ }
+  try { prisma.$disconnect(); } catch { /* already gone */ }
+}
+process.on("exit", shutdown);
+process.on("SIGINT",  () => { console.log(chalk.yellowBright("\n\n  👋  Goodbye!\n")); shutdown(); process.exit(0); });
+process.on("SIGTERM", () => { shutdown(); process.exit(0); });
+
+// ── Auth: happens on a clean screen BEFORE the main banner ──
+// The banner only appears after a successful login/register so
+// the user doesn't see a "welcome" screen and then a login prompt.
+console.clear();
+console.log(gradient.rainbow("  ⚡ EPIC CODE") + chalk.gray("  —  initialising...\n"));
+
+const session = await authFlow();
+
+// Load per-user config from DB (overrides file-based config)
 const userConfig = await loadUserConfig(session.userId);
-config = { ...config, ...userConfig } as any;
+config = { ...config, ...userConfig } as Config;
 
-// Start a new conversation in DB for this session
-let currentConvId = await createConversation(session.userId, config.model);
-let isFirstMessage = true;
-
-// Graceful shutdown
-process.on("exit", () => prisma.$disconnect());
-
-banner();
-startChat();
+// Now show the full banner and enter the chat loop
+banner(session);
+await startChat(session);
+shutdown();
