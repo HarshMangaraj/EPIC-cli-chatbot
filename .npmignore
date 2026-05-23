@@ -1,0 +1,24 @@
+# Source (users get the compiled dist/ only)
+src/
+*.ts
+!dist/**/*.d.ts
+
+# Config / tooling
+tsconfig.json
+prisma.config.ts
+bun.lock
+bun.lockb
+.env
+.env.*
+.env.example
+
+# Dev artifacts
+node_modules/
+.git/
+.gitignore
+coverage/
+*.log
+
+# OS
+.DS_Store
+Thumbs.db

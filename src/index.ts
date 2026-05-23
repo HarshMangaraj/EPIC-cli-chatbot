@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 
 import Groq from "groq-sdk";
 import dotenv from "dotenv";
@@ -9,8 +9,20 @@ import gradient from "gradient-string";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
+import * as crypto from "crypto";
 
-dotenv.config();
+/* ================================================== */
+/* ENV LOADING                                        */
+/* Load from ~/.epiccode/.env first (installed users) */
+/* then fall back to local .env (dev mode)            */
+/* ================================================== */
+
+const EPICCODE_DIR  = path.join(os.homedir(), ".epiccode");
+const EPICCODE_ENV  = path.join(EPICCODE_DIR, ".env");
+
+// Load user-level env first, then local .env (local wins in dev)
+if (fs.existsSync(EPICCODE_ENV)) dotenv.config({ path: EPICCODE_ENV });
+dotenv.config(); // local .env — overwrites if keys already set
 
 /* ================================================== */
 /* CONFIG FILE  (~/.epiccode.json)                    */
@@ -662,30 +674,101 @@ async function authFlow(): Promise<{ userId: number; email: string }> {
 }
 
 /* ================================================== */
+/* FIRST-RUN SETUP WIZARD                             */
+/* Runs when ~/.epiccode/.env doesn't exist yet.      */
+/* Saves keys there so they persist across updates.   */
+/* ================================================== */
+
+async function firstRunSetup() {
+  console.clear();
+  console.log(
+    gradient.rainbow.multiline("  ⚡ EPIC CODE") + "\n\n" +
+    chalk.cyanBright.bold("  Welcome! Let\'s get you set up.\n") +
+    chalk.gray("  This only happens once. Takes about 60 seconds.\n")
+  );
+
+  console.log(
+    chalk.gray("  You need two free accounts:\n") +
+    chalk.white("  1. Groq API key  →  ") + chalk.cyanBright("https://console.groq.com\n") +
+    chalk.white("  2. Neon database →  ") + chalk.cyanBright("https://neon.tech\n")
+  );
+
+  await askQuestion(chalk.gray("  Press Enter when you have both ready..."));
+  console.log();
+
+  const groqKey = await askQuestion(chalk.gray("  Paste your GROQ_API_KEY: "));
+  if (!groqKey.startsWith("gsk_")) {
+    console.log(chalk.yellowBright("  ⚠  That doesn\'t look like a Groq key (should start with gsk_)"));
+    console.log(chalk.gray("  Continuing anyway — you can fix it later in ~/.epiccode/.env\n"));
+  }
+
+  const dbUrl = await askQuestion(chalk.gray("  Paste your DATABASE_URL (PostgreSQL): "));
+  if (!dbUrl.startsWith("postgresql://") && !dbUrl.startsWith("postgres://")) {
+    console.log(chalk.yellowBright("  ⚠  That doesn\'t look like a PostgreSQL URL"));
+    console.log(chalk.gray("  Continuing anyway — you can fix it later in ~/.epiccode/.env\n"));
+  }
+
+  const jwtSecret = crypto.randomBytes(32).toString("hex");
+
+  const envContent = [
+    `GROQ_API_KEY=${groqKey.trim()}`,
+    `DATABASE_URL=${dbUrl.trim()}`,
+    `JWT_SECRET=${jwtSecret}`,
+    "",
+  ].join("\n");
+
+  fs.mkdirSync(EPICCODE_DIR, { recursive: true });
+  fs.writeFileSync(EPICCODE_ENV, envContent, { encoding: "utf-8", mode: 0o600 });
+
+  // Reload env into process now
+  dotenv.config({ path: EPICCODE_ENV });
+
+  console.log(
+    "\n" +
+    chalk.greenBright("  ✓ Config saved to ~/.epiccode/.env\n") +
+    chalk.gray("  Edit that file anytime to change your keys.\n")
+  );
+
+  // Run prisma migrate so the DB is ready
+  const spinner = ora({ text: chalk.blueBright("  Setting up your database..."), spinner: "dots" }).start();
+  try {
+    const { execSync } = await import("child_process");
+    const schemaPath = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "prisma", "schema.prisma");
+    execSync(`npx prisma migrate deploy --schema="${schemaPath}"`, { stdio: "pipe" });
+    spinner.succeed(chalk.greenBright("  Database ready!"));
+  } catch {
+    spinner.warn(chalk.yellowBright("  DB migration skipped — run `npx prisma migrate deploy` manually if needed."));
+  }
+
+  console.log();
+}
+
+/* ================================================== */
 /* ENTRY POINT                                        */
 /* ================================================== */
 
 process.env.PRISMA_CLIENT_ENGINE_TYPE =
   process.env.PRISMA_CLIENT_ENGINE_TYPE ?? "binary";
 
-// Deferred imports — must happen after env vars are set.
-// Wrapped in try/catch so a misconfigured .env shows a clear error
-// instead of silently skipping auth.
+// ── First-run: show setup wizard if no env file exists ───────
+const isFirstRun = !fs.existsSync(EPICCODE_ENV) && !process.env.GROQ_API_KEY;
+if (isFirstRun) await firstRunSetup();
+
 try {
   ({ loadSession, register, login, logout, loadUserConfig, saveUserConfig } =
-    await import("./auth"));
+    await import("./auth.js"));
   ({ createConversation, setConversationTitle, saveMessage, loadRecentMessages,
      listConversations, deleteConversation, deleteAccount } =
-    await import("./conversations"));
-  ({ prisma } = await import("./db"));
+    await import("./conversations.js"));
+  ({ prisma } = await import("./db.js"));
 } catch (err: any) {
   console.error(chalk.redBright("\n  ✗ Failed to load modules:\n"));
   console.error(chalk.gray("  " + (err?.message ?? String(err))));
-  console.error(chalk.gray("\n  Check your .env file and that the database is reachable.\n"));
+  console.error(chalk.gray("\n  Check your ~/.epiccode/.env and that your DATABASE_URL is reachable.\n"));
   process.exit(1);
 }
 
-// Graceful shutdown — disconnect Prisma and close readline
+
 function shutdown() {
   try { rl.close(); }    catch { /* already closed */ }
   try { prisma.$disconnect(); } catch { /* already gone */ }
@@ -694,19 +777,16 @@ process.on("exit", shutdown);
 process.on("SIGINT",  () => { console.log(chalk.yellowBright("\n\n  👋  Goodbye!\n")); shutdown(); process.exit(0); });
 process.on("SIGTERM", () => { shutdown(); process.exit(0); });
 
-// ── Auth: happens on a clean screen BEFORE the main banner ──
-// The banner only appears after a successful login/register so
-// the user doesn't see a "welcome" screen and then a login prompt.
+
 console.clear();
 console.log(gradient.rainbow("  ⚡ EPIC CODE") + chalk.gray("  —  initialising...\n"));
 
 const session = await authFlow();
 
-// Load per-user config from DB (overrides file-based config)
 const userConfig = await loadUserConfig(session.userId);
 config = { ...config, ...userConfig } as Config;
 
-// Now show the full banner and enter the chat loop
+
 banner(session);
 await startChat(session);
 shutdown();

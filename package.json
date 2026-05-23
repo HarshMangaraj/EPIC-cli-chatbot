@@ -1,30 +1,59 @@
+
 {
-  "name": "cli-chatbot",
-  "module": "index.ts",
+  "name": "epiccli",
+  "version": "1.0.0",
+  "description": "⚡ Epic CODE — AI coding assistant for your terminal",
+  "author": "Harsh Mangaraj",
+  "license": "MIT",
+  "keywords": ["ai", "cli", "coding", "assistant", "groq", "terminal", "chatbot"],
+  "homepage": "https://github.com/HarshMangaraj/EPIC-cli-chatbot/blob/main/README.md",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/HarshMangaraj/EPIC-cli-chatbot.git"
+  },
+
   "type": "module",
-  "private": true,
-  "devDependencies": {
-    "@types/bcryptjs": "^3.0.0",
-    "@types/bun": "latest",
-    "@types/jsonwebtoken": "^9.0.10",
-    "prisma": "^7.8.0"
+
+  "bin": {
+    "epiccli": "./dist/index.js"
   },
-  "peerDependencies": {
-    "typescript": "^5"
+
+  "scripts": {
+    "dev":             "bun run src/index.ts",
+    "build":           "bun build ./src/index.ts --outdir ./dist --target node --format esm --external prisma --external @prisma/client --external @prisma/adapter-pg --external pg",
+    "prepublishOnly":  "bun run build",
+    "postinstall":     "node ./dist/postinstall.js || true"
   },
+
+  "files": [
+    "dist/",
+    "prisma/schema.prisma",
+    "README.md"
+  ],
+
   "dependencies": {
-    "@neondatabase/serverless": "^1.1.0",
     "@prisma/adapter-pg": "^7.8.0",
-    "@prisma/client": "^7.8.0",
-    "bcryptjs": "^3.0.3",
-    "boxen": "^8.0.1",
-    "chalk": "^5.6.2",
-    "dotenv": "^17.4.2",
-    "gradient-string": "^3.0.0",
-    "groq-sdk": "^1.2.0",
-    "jsonwebtoken": "^9.0.3",
-    "marked": "9",
-    "marked-terminal": "6",
-    "ora": "^9.4.0"
+    "@prisma/client":     "^7.8.0",
+    "bcryptjs":           "^2.4.3",
+    "chalk":              "^5.3.0",
+    "dotenv":             "^16.4.5",
+    "gradient-string":    "^2.0.2",
+    "groq-sdk":           "^0.9.1",
+    "jsonwebtoken":       "^9.0.2",
+    "ora":                "^8.1.1",
+    "pg":                 "^8.13.3",
+    "prisma":             "^7.8.0"
+  },
+
+  "devDependencies": {
+    "@types/bcryptjs":    "^2.4.6",
+    "@types/jsonwebtoken": "^9.0.7",
+    "@types/node":        "^22.0.0",
+    "@types/pg":          "^8.11.10",
+    "typescript":         "^5.7.0"
+  },
+
+  "engines": {
+    "node": ">=20.0.0"
   }
 }
