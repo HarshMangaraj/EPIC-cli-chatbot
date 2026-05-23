@@ -754,6 +754,7 @@ process.env.PRISMA_CLIENT_ENGINE_TYPE =
 const isFirstRun = !fs.existsSync(EPICCODE_ENV) && !process.env.GROQ_API_KEY;
 if (isFirstRun) await firstRunSetup();
 
+// Deferred imports — must happen after env vars are set.
 try {
   ({ loadSession, register, login, logout, loadUserConfig, saveUserConfig } =
     await import("./auth.js"));
@@ -768,7 +769,7 @@ try {
   process.exit(1);
 }
 
-
+// Graceful shutdown — disconnect Prisma and close readline
 function shutdown() {
   try { rl.close(); }    catch { /* already closed */ }
   try { prisma.$disconnect(); } catch { /* already gone */ }
@@ -777,16 +778,17 @@ process.on("exit", shutdown);
 process.on("SIGINT",  () => { console.log(chalk.yellowBright("\n\n  👋  Goodbye!\n")); shutdown(); process.exit(0); });
 process.on("SIGTERM", () => { shutdown(); process.exit(0); });
 
-
+// ── Auth ─────────────────────────────────────────────────────
 console.clear();
 console.log(gradient.rainbow("  ⚡ EPIC CODE") + chalk.gray("  —  initialising...\n"));
 
 const session = await authFlow();
 
+// Load per-user config from DB (overrides file-based config)
 const userConfig = await loadUserConfig(session.userId);
 config = { ...config, ...userConfig } as Config;
 
-
+// Show banner and enter chat loop
 banner(session);
 await startChat(session);
 shutdown();

@@ -1,4 +1,4 @@
-import { prisma } from "./db";
+import { prisma } from "./db.js";
 
 // ── Create ────────────────────────────────────────────────────
 export async function createConversation(userId: number, model: string) {

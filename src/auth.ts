@@ -3,7 +3,7 @@ import jwt from "jsonwebtoken";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import { prisma } from "./db";
+import { prisma } from "./db.js";
 
 // ── JWT secret ───────────────────────────────────────────────
 // Falls back to a hardcoded dev secret so the app still runs,
@@ -114,4 +114,4 @@ function saveToken(userId: number, email: string): Session {
     // On Windows, mode is ignored but the write still works
   }
   return { userId, email };
-}
+} 
